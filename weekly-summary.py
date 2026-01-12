@@ -284,12 +284,12 @@ def get_top_tracks_last_7_days(
     return [(r[0], f"{r[1]} — {r[2]}", 1) for r in rows_sorted]
 
 
-def get_top_album_last_7_days(conn: sqlite3.Connection) -> Optional[Tuple[str, str, int]]:
-    """Returns (album_id, album_name, play_count) or None"""
+def get_top_album_last_7_days(conn: sqlite3.Connection) -> Optional[Tuple[str, str, str, int]]:
+    """Returns (album_id, album_name, artist_name, play_count) or None"""
     since = int(time.time()) - 7 * 24 * 3600
     row = conn.execute(
         """
-        SELECT album_id, album_name, COUNT(*) as c
+        SELECT album_id, album_name, artist_name, COUNT(*) as c
         FROM plays
         WHERE played_at_unix >= ?
           AND album_id IS NOT NULL
@@ -301,7 +301,7 @@ def get_top_album_last_7_days(conn: sqlite3.Connection) -> Optional[Tuple[str, s
     ).fetchone()
 
     if row:
-        return (row[0], row[1], int(row[2]))
+        return (row[0], row[1], row[2], int(row[3]))
     return None
 
 
@@ -311,7 +311,9 @@ def parse_playlist_id(uri: Optional[str]) -> Optional[str]:
     return None
 
 
-def get_top_playlist_last_7_days(conn: sqlite3.Connection) -> Optional[Tuple[str, str, int]]:
+def get_top_playlist_last_7_days(
+    conn: sqlite3.Connection, sp: spotipy.Spotify
+) -> Optional[Tuple[str, str, int]]:
     """Returns (playlist_name, playlist_url, play_count) or None"""
     since = int(time.time()) - 7 * 24 * 3600
     rows = conn.execute(
@@ -323,40 +325,62 @@ def get_top_playlist_last_7_days(conn: sqlite3.Connection) -> Optional[Tuple[str
           AND context_uri IS NOT NULL
         GROUP BY context_uri
         ORDER BY c DESC
-        LIMIT 1
+        LIMIT 10
         """,
         (since,),
-    ).fetchone()
+    ).fetchall()
 
     if not rows:
         return None
 
-    pid = parse_playlist_id(rows[0])
-    if not pid:
-        return None
+    for row in rows:
+        pid = parse_playlist_id(row[0])
+        if not pid:
+            continue
 
-    meta = conn.execute(
-        """
-        SELECT name, COALESCE(url,'')
-        FROM playlists
-        WHERE playlist_id = ?
-        """,
-        (pid,),
-    ).fetchone()
+        meta = conn.execute(
+            """
+            SELECT name, COALESCE(url,'')
+            FROM playlists
+            WHERE playlist_id = ?
+            """,
+            (pid,),
+        ).fetchone()
 
-    if meta:
-        return (meta[0], meta[1], int(rows[1]))
+        if meta:
+            return (meta[0], meta[1], int(row[1]))
+
+        # Fetch from Spotify API if not cached (e.g., Discover Weekly, Daily Mix)
+        try:
+            playlist_data = sp.playlist(pid, fields="name,external_urls")
+            name = playlist_data.get("name", "Unknown Playlist")
+            url = (playlist_data.get("external_urls") or {}).get("spotify", "")
+            # Cache for future use
+            conn.execute(
+                """
+                INSERT INTO playlists (playlist_id, name, url)
+                VALUES (?, ?, ?)
+                ON CONFLICT(playlist_id) DO UPDATE SET name=excluded.name, url=excluded.url
+                """,
+                (pid, name, url),
+            )
+            conn.commit()
+            return (name, url, int(row[1]))
+        except spotipy.SpotifyException:
+            # Playlist not accessible (404, private, etc.), try next one
+            continue
+
     return None
 
 
 # ---------- Bluesky ----------
 def build_post_content(
     tracks: List[Tuple[str, str, int]],
-    album: Optional[Tuple[str, str, int]],
+    album: Optional[Tuple[str, str, str, int]],
     playlist: Optional[Tuple[str, str, int]],
 ):
     b = client_utils.TextBuilder()
-    b.text("🎵 This week:\n\n")
+    b.text("Top 🎵 This week:\n\n")
 
     # Top tracks
     if tracks:
@@ -369,10 +393,10 @@ def build_post_content(
 
     # Top album
     if album:
-        album_id, album_name, count = album
+        album_id, album_name, artist_name, count = album
         b.text("\n📀 ")
         album_url = f"https://open.spotify.com/album/{album_id}"
-        b.link(album_name, album_url)
+        b.link(f"{album_name} — {artist_name}", album_url)
 
     # Top playlist
     if playlist:
@@ -419,7 +443,7 @@ def main() -> int:
 
     tracks = get_top_tracks_last_7_days(conn, MAX_TOP_TRACKS)
     album = get_top_album_last_7_days(conn)
-    playlist = get_top_playlist_last_7_days(conn)
+    playlist = get_top_playlist_last_7_days(conn, sp)
 
     content = build_post_content(tracks, album, playlist)
     post_to_bluesky(content)

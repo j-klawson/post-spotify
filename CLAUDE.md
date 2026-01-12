@@ -16,11 +16,12 @@ The script evolved through several iterations:
 - **Album tracking**: Added to database schema to support top album feature
 - **Compact formatting**: Minimal text, emoji-based sections, conditional play counts
 - **Single playlist**: Changed from multiple playlists to just the top one for brevity
+- **Playlist fallback**: Spotify-generated playlists (Daily Mix, Discover Weekly) use ephemeral IDs that expire; the code tries up to 10 playlists to find one that's still accessible
 
 ## Code Structure
 
 - `ingest_recently_played()`: Fetches and stores Spotify listening data
 - `get_top_tracks_last_7_days()`: Aggregates most-played tracks with smart sorting
-- `get_top_album_last_7_days()`: Finds most-played album
+- `get_top_album_last_7_days()`: Finds most-played album with artist
 - `get_top_playlist_last_7_days()`: Identifies top playlist from context data
 - `build_post_content()`: Formats content for Bluesky with proper facets
