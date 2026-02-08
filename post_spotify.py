@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """
-weekly-summary.py
+post_spotify.py
 
-Single short Bluesky post:
+Post Spotify listening summary to social platforms (Bluesky, Mastodon).
+
 - Top 3 Spotify tracks listened to in the last 7 days (each track links to Spotify)
 - Top album listened to in the last 7 days
 - Top playlist listened to in the last 7 days (ONLY when Spotify provides playlist context)
 
 Supports:
   --ingest-only   Ingest listening data into SQLite but do not post
+  --bluesky       Post to Bluesky only
+  --mastodon      Post to Mastodon only
+  (no flags)      Post to all configured platforms
 
 Notes:
 - Spotify's recently-played API is limited; ingest regularly for best results.
@@ -18,16 +22,21 @@ Env vars (.env supported):
   SPOTIFY_CLIENT_ID
   SPOTIFY_CLIENT_SECRET
   SPOTIFY_REDIRECT_URI
+
+For Bluesky:
   BSKY_HANDLE
   BSKY_PASSWORD
+
+For Mastodon:
+  MASTODON_INSTANCE
+  MASTODON_ACCESS_TOKEN
 
 Optional env vars:
   SPOTIFY_TOKEN_CACHE=.spotify_token_cache
   SQLITE_PATH=spotify_listening.sqlite3
-  BSKY_CHAR_LIMIT=300
   INGEST_LOOKBACK_HOURS=26
-  MAX_TOP_TRACKS=5
-  MAX_PLAYLISTS=5
+  MAX_TOP_TRACKS=3
+  MAX_PLAYLISTS=1
 """
 
 import os
@@ -36,45 +45,44 @@ import time
 import argparse
 import sqlite3
 import datetime as dt
-from typing import List, Tuple, Optional
+from abc import ABC, abstractmethod
+from typing import List, Tuple, Optional, Any
 
 from dotenv import load_dotenv
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 
-from atproto import Client, client_utils
-
 load_dotenv()
 
-# ---------- Required ----------
+# ---------- Required Spotify ----------
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
 SPOTIFY_REDIRECT_URI = os.getenv("SPOTIFY_REDIRECT_URI")
+
+# ---------- Platform Credentials ----------
 BSKY_HANDLE = os.getenv("BSKY_HANDLE")
 BSKY_PASSWORD = os.getenv("BSKY_PASSWORD")
-
-required_vars = [
-    "SPOTIFY_CLIENT_ID",
-    "SPOTIFY_CLIENT_SECRET",
-    "SPOTIFY_REDIRECT_URI",
-    "BSKY_HANDLE",
-    "BSKY_PASSWORD",
-]
-missing = [v for v in required_vars if not os.getenv(v)]
-if missing:
-    print("Error: Missing required environment variables:")
-    for v in missing:
-        print(f"- {v}")
-    sys.exit(1)
+MASTODON_INSTANCE = os.getenv("MASTODON_INSTANCE")
+MASTODON_ACCESS_TOKEN = os.getenv("MASTODON_ACCESS_TOKEN")
 
 # ---------- Optional ----------
 SPOTIFY_TOKEN_CACHE = os.getenv("SPOTIFY_TOKEN_CACHE", ".spotify_token_cache")
 SQLITE_PATH = os.getenv("SQLITE_PATH", "spotify_listening.sqlite3")
-BSKY_CHAR_LIMIT = int(os.getenv("BSKY_CHAR_LIMIT", "300"))
 
 INGEST_LOOKBACK_HOURS = int(os.getenv("INGEST_LOOKBACK_HOURS", "26"))
 MAX_TOP_TRACKS = int(os.getenv("MAX_TOP_TRACKS", "3"))
 MAX_PLAYLISTS = int(os.getenv("MAX_PLAYLISTS", "1"))
+
+
+def check_spotify_credentials() -> None:
+    """Check that required Spotify credentials are set."""
+    required = ["SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET", "SPOTIFY_REDIRECT_URI"]
+    missing = [v for v in required if not os.getenv(v)]
+    if missing:
+        print("Error: Missing required Spotify environment variables:")
+        for v in missing:
+            print(f"- {v}")
+        sys.exit(1)
 
 
 # ---------- Spotify ----------
@@ -243,12 +251,11 @@ def get_top_tracks_last_7_days(
       - If any track repeats (max count > 1):
           sort by count DESC, then last_played DESC
       - Else:
-          return the most recently played 5 unique tracks (chronological recency)
+          return the most recently played unique tracks (chronological recency)
           (count will be 1 for all)
     """
     since = int(time.time()) - 7 * 24 * 3600
 
-    # Aggregate plays by track within last 24h: count + most recent play time
     rows = conn.execute(
         """
         SELECT
@@ -373,62 +380,225 @@ def get_top_playlist_last_7_days(
     return None
 
 
-# ---------- Bluesky ----------
-def build_post_content(
-    tracks: List[Tuple[str, str, int]],
-    album: Optional[Tuple[str, str, str, int]],
-    playlist: Optional[Tuple[str, str, int]],
-):
-    b = client_utils.TextBuilder()
-    b.text("Top 🎵 This week:\n\n")
+# ---------- Abstract Poster Base Class ----------
+class BasePoster(ABC):
+    """Abstract base class for social media posters."""
 
-    # Top tracks
-    if tracks:
-        for track_id, label, n in tracks:
-            track_url = f"https://open.spotify.com/track/{track_id}"
-            b.link(label, track_url)
-            if n > 1:
-                b.text(f" (x{n})")
-            b.text("\n")
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        """Human-readable name of the platform."""
+        pass
 
-    # Top album
-    if album:
-        album_id, album_name, artist_name, count = album
-        b.text("\n📀 ")
-        album_url = f"https://open.spotify.com/album/{album_id}"
-        b.link(f"{album_name} — {artist_name}", album_url)
+    @abstractmethod
+    def is_configured(self) -> bool:
+        """Check if the platform credentials are configured."""
+        pass
 
-    # Top playlist
-    if playlist:
-        name, url, count = playlist
-        b.text("\n📂 ")
-        if url:
-            b.link(name, url)
-        else:
-            b.text(name)
+    @abstractmethod
+    def build_content(
+        self,
+        tracks: List[Tuple[str, str, int]],
+        album: Optional[Tuple[str, str, str, int]],
+        playlist: Optional[Tuple[str, str, int]],
+    ) -> Any:
+        """Build platform-specific content."""
+        pass
 
-    b.text("\n\n")
-    b.tag("#NowPlaying", "NowPlaying")
-    b.text(" ")
-    b.tag("#Music", "Music")
+    @abstractmethod
+    def post(self, content: Any) -> None:
+        """Post content to the platform."""
+        pass
 
-    return b
+    def post_summary(
+        self,
+        tracks: List[Tuple[str, str, int]],
+        album: Optional[Tuple[str, str, str, int]],
+        playlist: Optional[Tuple[str, str, int]],
+    ) -> None:
+        """Build and post the summary."""
+        content = self.build_content(tracks, album, playlist)
+        self.post(content)
+        print(f"Posted to {self.name}")
 
-def post_to_bluesky(content) -> None:
-    client = Client()
-    client.login(BSKY_HANDLE, BSKY_PASSWORD)
-    client.send_post(content)
+
+# ---------- Bluesky Poster ----------
+class BlueskyPoster(BasePoster):
+    """Posts to Bluesky using AT Protocol."""
+
+    @property
+    def name(self) -> str:
+        return "Bluesky"
+
+    def is_configured(self) -> bool:
+        return bool(BSKY_HANDLE and BSKY_PASSWORD)
+
+    def build_content(
+        self,
+        tracks: List[Tuple[str, str, int]],
+        album: Optional[Tuple[str, str, str, int]],
+        playlist: Optional[Tuple[str, str, int]],
+    ):
+        from atproto import client_utils
+
+        b = client_utils.TextBuilder()
+        b.text("Top 🎵 This week:\n\n")
+
+        # Top tracks
+        if tracks:
+            for track_id, label, n in tracks:
+                track_url = f"https://open.spotify.com/track/{track_id}"
+                b.link(label, track_url)
+                if n > 1:
+                    b.text(f" (x{n})")
+                b.text("\n")
+
+        # Top album
+        if album:
+            album_id, album_name, artist_name, count = album
+            b.text("\n📀 ")
+            album_url = f"https://open.spotify.com/album/{album_id}"
+            b.link(f"{album_name} — {artist_name}", album_url)
+
+        # Top playlist
+        if playlist:
+            name, url, count = playlist
+            b.text("\n📂 ")
+            if url:
+                b.link(name, url)
+            else:
+                b.text(name)
+
+        b.text("\n\n")
+        b.tag("#NowPlaying", "NowPlaying")
+        b.text(" ")
+        b.tag("#Music", "Music")
+
+        return b
+
+    def post(self, content) -> None:
+        from atproto import Client
+
+        client = Client()
+        client.login(BSKY_HANDLE, BSKY_PASSWORD)
+        client.send_post(content)
+
+
+# ---------- Mastodon Poster ----------
+class MastodonPoster(BasePoster):
+    """Posts to Mastodon."""
+
+    @property
+    def name(self) -> str:
+        return "Mastodon"
+
+    def is_configured(self) -> bool:
+        return bool(MASTODON_INSTANCE and MASTODON_ACCESS_TOKEN)
+
+    def build_content(
+        self,
+        tracks: List[Tuple[str, str, int]],
+        album: Optional[Tuple[str, str, str, int]],
+        playlist: Optional[Tuple[str, str, int]],
+    ) -> str:
+        """Build plain text content for Mastodon (URLs auto-linkified)."""
+        lines = ["Top 🎵 This week:", ""]
+
+        # Top tracks
+        if tracks:
+            for track_id, label, n in tracks:
+                track_url = f"https://open.spotify.com/track/{track_id}"
+                line = f"{label} {track_url}"
+                if n > 1:
+                    line += f" (x{n})"
+                lines.append(line)
+
+        # Top album
+        if album:
+            album_id, album_name, artist_name, count = album
+            album_url = f"https://open.spotify.com/album/{album_id}"
+            lines.append("")
+            lines.append(f"📀 {album_name} — {artist_name} {album_url}")
+
+        # Top playlist
+        if playlist:
+            name, url, count = playlist
+            lines.append("")
+            if url:
+                lines.append(f"📂 {name} {url}")
+            else:
+                lines.append(f"📂 {name}")
+
+        lines.append("")
+        lines.append("#NowPlaying #Music #Spotify")
+
+        return "\n".join(lines)
+
+    def post(self, content: str) -> None:
+        from mastodon import Mastodon
+
+        client = Mastodon(
+            access_token=MASTODON_ACCESS_TOKEN,
+            api_base_url=MASTODON_INSTANCE,
+        )
+        client.status_post(content)
+
+
+# ---------- Poster Registry ----------
+def get_all_posters() -> List[BasePoster]:
+    """Return all available poster implementations."""
+    return [BlueskyPoster(), MastodonPoster()]
+
+
+def get_configured_posters(requested: Optional[List[str]] = None) -> List[BasePoster]:
+    """
+    Get posters to use based on configuration and CLI flags.
+
+    Args:
+        requested: List of platform names requested via CLI flags.
+                   If None or empty, returns all configured platforms.
+    """
+    all_posters = get_all_posters()
+
+    if requested:
+        # Filter to only requested platforms
+        posters = [p for p in all_posters if p.name.lower() in [r.lower() for r in requested]]
+        # Check that requested platforms are configured
+        for p in posters:
+            if not p.is_configured():
+                print(f"Error: {p.name} requested but not configured.")
+                print(f"Please set the required environment variables for {p.name}.")
+                sys.exit(1)
+        return posters
+    else:
+        # Return all configured platforms
+        return [p for p in all_posters if p.is_configured()]
 
 
 # ---------- Main ----------
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Post weekly Spotify summary to Bluesky")
+    parser = argparse.ArgumentParser(
+        description="Post weekly Spotify summary to social platforms"
+    )
     parser.add_argument(
         "--ingest-only",
         action="store_true",
         help="Ingest listening history into SQLite but do not post",
     )
+    parser.add_argument(
+        "--bluesky",
+        action="store_true",
+        help="Post to Bluesky",
+    )
+    parser.add_argument(
+        "--mastodon",
+        action="store_true",
+        help="Post to Mastodon",
+    )
     args = parser.parse_args()
+
+    # Check Spotify credentials
+    check_spotify_credentials()
 
     sp = spotify_client()
     conn = db_connect(SQLITE_PATH)
@@ -441,16 +611,36 @@ def main() -> int:
         print(f"Ingest complete: {inserted} new plays added.")
         return 0
 
+    # Determine which platforms to post to
+    requested_platforms = []
+    if args.bluesky:
+        requested_platforms.append("bluesky")
+    if args.mastodon:
+        requested_platforms.append("mastodon")
+
+    posters = get_configured_posters(requested_platforms if requested_platforms else None)
+
+    if not posters:
+        print("Error: No platforms configured.")
+        print("Please configure at least one platform in your .env file:")
+        print("  - Bluesky: BSKY_HANDLE and BSKY_PASSWORD")
+        print("  - Mastodon: MASTODON_INSTANCE and MASTODON_ACCESS_TOKEN")
+        return 1
+
+    # Get data
     tracks = get_top_tracks_last_7_days(conn, MAX_TOP_TRACKS)
     album = get_top_album_last_7_days(conn)
     playlist = get_top_playlist_last_7_days(conn, sp)
 
-    content = build_post_content(tracks, album, playlist)
-    post_to_bluesky(content)
+    # Post to each platform
+    for poster in posters:
+        try:
+            poster.post_summary(tracks, album, playlist)
+        except Exception as e:
+            print(f"Error posting to {poster.name}: {e}")
 
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

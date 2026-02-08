@@ -11,5 +11,5 @@ set -a
 source .env
 set +a
 
-./weekly-summary.py "$@"
+./post_spotify.py "$@"
 
