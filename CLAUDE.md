@@ -9,7 +9,7 @@ The script evolved through several iterations:
 2. Converted to weekly summary covering 7 days
 3. Refined to show top 3 tracks, top album, and top playlist
 4. Optimized post format to stay within 300 character limit
-5. Refactored to support multiple platforms (Bluesky, Mastodon)
+5. Refactored to support multiple platforms (Bluesky, Mastodon, X/Twitter)
 
 ## Key Design Decisions
 
@@ -26,7 +26,8 @@ The script evolved through several iterations:
 post_spotify.py
 ├── BasePoster (ABC)
 │   ├── BlueskyPoster - Uses atproto TextBuilder for rich text
-│   └── MastodonPoster - Uses plain text with auto-linkified URLs
+│   ├── MastodonPoster - Uses plain text with auto-linkified URLs
+│   └── XPoster - Uses tweepy for X/Twitter API v2
 ├── Spotify integration (spotipy)
 ├── SQLite storage
 └── CLI with platform selection flags
@@ -41,6 +42,7 @@ post_spotify.py
 - `BasePoster`: Abstract class for social media platforms
 - `BlueskyPoster.build_content()`: Formats content for Bluesky with proper facets
 - `MastodonPoster.build_content()`: Formats plain text for Mastodon
+- `XPoster.build_content()`: Formats plain text for X/Twitter
 
 ## CLI Usage
 
@@ -48,6 +50,7 @@ post_spotify.py
 ./run.sh                      # Post to all configured platforms
 ./run.sh --bluesky            # Post to Bluesky only
 ./run.sh --mastodon           # Post to Mastodon only
+./run.sh --x                  # Post to X (Twitter) only
 ./run.sh --bluesky --mastodon # Post to both explicitly
 ./run.sh --ingest-only        # Ingest data without posting
 ```

@@ -2,3 +2,4 @@ spotipy
 atproto
 python-dotenv
 Mastodon.py
+tweepy

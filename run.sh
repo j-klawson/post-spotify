@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd /home/lawsonk/repos/post-spotify
+cd /home/keith/repos/post-spotify
 
 # Activate virtualenv
 source .venv/bin/activate

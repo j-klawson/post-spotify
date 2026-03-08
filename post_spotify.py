@@ -2,7 +2,7 @@
 """
 post_spotify.py
 
-Post Spotify listening summary to social platforms (Bluesky, Mastodon).
+Post Spotify listening summary to social platforms (Bluesky, Mastodon, X/Twitter).
 
 - Top 3 Spotify tracks listened to in the last 7 days (each track links to Spotify)
 - Top album listened to in the last 7 days
@@ -12,6 +12,7 @@ Supports:
   --ingest-only   Ingest listening data into SQLite but do not post
   --bluesky       Post to Bluesky only
   --mastodon      Post to Mastodon only
+  --x             Post to X (Twitter) only
   (no flags)      Post to all configured platforms
 
 Notes:
@@ -30,6 +31,12 @@ For Bluesky:
 For Mastodon:
   MASTODON_INSTANCE
   MASTODON_ACCESS_TOKEN
+
+For X/Twitter:
+  X_API_KEY
+  X_API_KEY_SECRET
+  X_ACCESS_TOKEN
+  X_ACCESS_TOKEN_SECRET
 
 Optional env vars:
   SPOTIFY_TOKEN_CACHE=.spotify_token_cache
@@ -64,6 +71,10 @@ BSKY_HANDLE = os.getenv("BSKY_HANDLE")
 BSKY_PASSWORD = os.getenv("BSKY_PASSWORD")
 MASTODON_INSTANCE = os.getenv("MASTODON_INSTANCE")
 MASTODON_ACCESS_TOKEN = os.getenv("MASTODON_ACCESS_TOKEN")
+X_API_KEY = os.getenv("X_API_KEY")
+X_API_KEY_SECRET = os.getenv("X_API_KEY_SECRET")
+X_ACCESS_TOKEN = os.getenv("X_ACCESS_TOKEN")
+X_ACCESS_TOKEN_SECRET = os.getenv("X_ACCESS_TOKEN_SECRET")
 
 # ---------- Optional ----------
 SPOTIFY_TOKEN_CACHE = os.getenv("SPOTIFY_TOKEN_CACHE", ".spotify_token_cache")
@@ -544,10 +555,72 @@ class MastodonPoster(BasePoster):
         client.status_post(content)
 
 
+# ---------- X/Twitter Poster ----------
+class XPoster(BasePoster):
+    """Posts to X (Twitter) using Tweepy."""
+
+    @property
+    def name(self) -> str:
+        return "X"
+
+    def is_configured(self) -> bool:
+        return bool(X_API_KEY and X_API_KEY_SECRET and X_ACCESS_TOKEN and X_ACCESS_TOKEN_SECRET)
+
+    def build_content(
+        self,
+        tracks: List[Tuple[str, str, int]],
+        album: Optional[Tuple[str, str, str, int]],
+        playlist: Optional[Tuple[str, str, int]],
+    ) -> str:
+        """Build plain text content for X (URLs auto-linkified)."""
+        lines = ["Top 🎵 This week:", ""]
+
+        # Top tracks
+        if tracks:
+            for track_id, label, n in tracks:
+                track_url = f"https://open.spotify.com/track/{track_id}"
+                line = f"{label} {track_url}"
+                if n > 1:
+                    line += f" (x{n})"
+                lines.append(line)
+
+        # Top album
+        if album:
+            album_id, album_name, artist_name, count = album
+            album_url = f"https://open.spotify.com/album/{album_id}"
+            lines.append("")
+            lines.append(f"📀 {album_name} — {artist_name} {album_url}")
+
+        # Top playlist
+        if playlist:
+            name, url, count = playlist
+            lines.append("")
+            if url:
+                lines.append(f"📂 {name} {url}")
+            else:
+                lines.append(f"📂 {name}")
+
+        lines.append("")
+        lines.append("#NowPlaying #Music #Spotify")
+
+        return "\n".join(lines)
+
+    def post(self, content: str) -> None:
+        import tweepy
+
+        client = tweepy.Client(
+            consumer_key=X_API_KEY,
+            consumer_secret=X_API_KEY_SECRET,
+            access_token=X_ACCESS_TOKEN,
+            access_token_secret=X_ACCESS_TOKEN_SECRET,
+        )
+        client.create_tweet(text=content)
+
+
 # ---------- Poster Registry ----------
 def get_all_posters() -> List[BasePoster]:
     """Return all available poster implementations."""
-    return [BlueskyPoster(), MastodonPoster()]
+    return [BlueskyPoster(), MastodonPoster(), XPoster()]
 
 
 def get_configured_posters(requested: Optional[List[str]] = None) -> List[BasePoster]:
@@ -595,6 +668,11 @@ def main() -> int:
         action="store_true",
         help="Post to Mastodon",
     )
+    parser.add_argument(
+        "--x",
+        action="store_true",
+        help="Post to X (Twitter)",
+    )
     args = parser.parse_args()
 
     # Check Spotify credentials
@@ -617,6 +695,8 @@ def main() -> int:
         requested_platforms.append("bluesky")
     if args.mastodon:
         requested_platforms.append("mastodon")
+    if args.x:
+        requested_platforms.append("x")
 
     posters = get_configured_posters(requested_platforms if requested_platforms else None)
 
@@ -625,6 +705,7 @@ def main() -> int:
         print("Please configure at least one platform in your .env file:")
         print("  - Bluesky: BSKY_HANDLE and BSKY_PASSWORD")
         print("  - Mastodon: MASTODON_INSTANCE and MASTODON_ACCESS_TOKEN")
+        print("  - X: X_API_KEY, X_API_KEY_SECRET, X_ACCESS_TOKEN, X_ACCESS_TOKEN_SECRET")
         return 1
 
     # Get data
